@@ -2,9 +2,10 @@
 
 const config = require('haraka-config');
 const logger = require('../logger');
+const { re } = require('haraka-plugin-attachment');
 
 function load_config () {
-    const cfg = exports.cfg = config.get('outbound.ini', {
+    const _config = config.get('outbound.ini', {
         booleans: [
             '-disabled',
             '-always_split',
@@ -14,7 +15,9 @@ function load_config () {
         ],
     }, () => {
         load_config();
-    }).main;
+    });
+
+    const cfg = exports.cfg = _config.main;
 
     // legacy config file support. Remove in Haraka 4.0
     if (!cfg.disabled && config.get('outbound.disabled')) {
@@ -35,12 +38,41 @@ function load_config () {
     if (!cfg.connect_timeout) {
         cfg.connect_timeout = 30;
     }
+
+    if (!cfg.pool_timeout) {
+        cfg.pool_timeout = config.get('outbound.pool_timeout') || 0;
+    }
+
+    if (!cfg.pool_concurrency_max) {
+        cfg.pool_concurrency_max = config.get('outbound.pool_concurrency_max') || 0;
+    }
+
     if (!cfg.ipv6_enabled && config.get('outbound.ipv6_enabled')) {
         cfg.ipv6_enabled = true;
     }
     if (!cfg.received_header) {
         cfg.received_header = config.get('outbound.received_header') || 'Haraka outbound';
     }
+
+    cfg.pools = [];
+    Object.keys(cfg).filter(k => k !== 'main').forEach(k => {
+        const poolCfg = cfg[k];
+
+        if (poolCfg.disabled) return;
+
+        const hosts = poolCfg.hosts.split(/\s*,\s*/);
+        poolCfg.hosts = hosts;
+
+        if (!poolCfg.pool_timeout){
+            poolCfg.pool_timeout = cfg.pool_timeout;
+        }
+
+        if (!poolCfg.pool_concurrency_max){
+            poolCfg.pool_concurrency_max = cfg.pool_concurrency_max;
+        }
+
+        cfg.pools.push(poolCfg);
+    });
 
     exports.set_temp_fail_intervals();
 }
