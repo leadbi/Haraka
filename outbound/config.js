@@ -55,8 +55,8 @@ function load_config () {
     }
 
     cfg.pools = [];
-    Object.keys(cfg).filter(k => k !== 'main').forEach(k => {
-        const poolCfg = cfg[k];
+    Object.keys(_config).filter(k => k !== 'main').forEach(k => {
+        const poolCfg = _config[k];
 
         if (poolCfg.disabled) return;
 
