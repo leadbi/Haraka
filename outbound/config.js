@@ -4,13 +4,14 @@ const config = require('haraka-config');
 const logger = require('../logger');
 const { re } = require('haraka-plugin-attachment');
 
+exports.name = 'outbound/config'
+
 function load_config () {
     const _config = config.get('outbound.ini', {
         booleans: [
             '-disabled',
             '-always_split',
             '+enable_tls',
-            '-ipv6_enabled',
             '-local_mx_ok',
         ],
     }, () => {
@@ -96,8 +97,8 @@ exports.set_temp_fail_intervals = function () {
 
     // Helpful error function in case of parsing failure
     function error (i, msg) {
-        logger.logerror(`outbound temp_fail_intervals syntax error parsing element ${i}: ${msg}`);
-        logger.logwarn('Setting outbound temp_fail_intervals to old defaults because of previous error');
+        logger.error(exports, `temp_fail_intervals syntax error parsing element ${i}: ${msg}`);
+        logger.warn(exports, 'Setting outbound temp_fail_intervals to old defaults');
         set_old_defaults();
     }
 

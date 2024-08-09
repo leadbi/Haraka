@@ -1,19 +1,18 @@
 'use strict';
 // smtp network server
 
-const daemon      = require('daemon');
-const fs          = require('fs');
-const os          = require('os');
-const path        = require('path');
-const tls         = require('tls');
+const cluster     = require('node:cluster');
+const fs          = require('node:fs');
+const os          = require('node:os');
+const path        = require('node:path');
+const tls         = require('node:tls');
 
-// let log = require('why-is-node-running');
+const daemon      = require('daemon');
+const constants   = require('haraka-constants');
+
 const tls_socket  = require('./tls_socket');
 const conn        = require('./connection');
 const outbound    = require('./outbound');
-const async       = require('async');
-const cluster     = require('cluster');
-const constants   = require('haraka-constants');
 const endpoint    = require('./endpoint');
 
 const Server      = exports;
@@ -22,7 +21,7 @@ Server.config     = require('haraka-config');
 Server.plugins    = require('./plugins');
 Server.notes      = {};
 
-const { logger }      = Server;
+const { logger }  = Server;
 
 // Need these here so we can run hooks
 logger.add_log_methods(Server, 'server');
@@ -45,7 +44,7 @@ Server.load_smtp_ini = () => {
     });
 
     if (Server.cfg.main.nodes === undefined) {
-        logger.logwarn(`smtp.ini.nodes unset, using 1, see https://github.com/haraka/Haraka/wiki/Performance-Tuning`)
+        Server.logwarn(`smtp.ini.nodes unset, using 1, see https://github.com/haraka/Haraka/wiki/Performance-Tuning`)
     }
 
     const defaults = {
@@ -62,12 +61,9 @@ Server.load_smtp_ini = () => {
 
     const strict_ext = Server.config.get('strict_rfc1869');
     if (Server.cfg.main.strict_rfc1869 === false && strict_ext) {
-        logger.logwarn(`legacy config config/strict_rfc1869 is overriding smtp.ini`)
+        Server.logwarn(`legacy config config/strict_rfc1869 is overriding smtp.ini`)
         Server.cfg.main.strict_rfc1869 = strict_ext;
     }
-
-    const hhv = Server.config.get('header_hide_version')  // backwards compat
-    if (hhv !== null && !hhv) Server.cfg.headers.show_version = false;
 
     for (const key in defaults) {
         if (Server.cfg.main[key] !== undefined) continue;
@@ -93,7 +89,7 @@ Server.daemonize = function () {
         // Remove process.on('exit') listeners otherwise
         // we get a spurious 'Exiting' log entry.
         process.removeAllListeners('exit');
-        logger.lognotice('Daemonizing...');
+        Server.lognotice('Daemonizing...');
     }
 
     const log_fd = fs.openSync(c.daemon_log_file, 'a');
@@ -105,7 +101,7 @@ Server.daemonize = function () {
         npid.create(c.daemon_pid_file).removeOnExit();
     }
     catch (err) {
-        logger.logerror(err.message);
+        Server.logerror(err.message);
         logger.dump_and_exit(1);
     }
 }
@@ -121,17 +117,17 @@ Server.flushQueue = domain => {
     }
 }
 
-let gracefull_in_progress = false;
+let graceful_in_progress = false;
 
 Server.gracefulRestart = () => {
     Server._graceful();
 }
 
 Server.stopListeners = () => {
-    logger.loginfo('Shutting down listeners');
-    Server.listeners.forEach(server => {
-        server.close();
-    });
+    Server.loginfo('Shutting down listeners');
+    for (const l of Server.listeners) {
+        l.close();
+    }
     Server.listeners = [];
 }
 
@@ -139,7 +135,7 @@ Server.performShutdown = () => {
     if (Server.cfg.main.graceful_shutdown) {
         return Server.gracefulShutdown();
     }
-    logger.loginfo("Shutting down.");
+    Server.loginfo("Shutting down.");
     process.exit(0);
 }
 
@@ -147,90 +143,104 @@ Server.gracefulShutdown = () => {
     Server.stopListeners();
     Server._graceful(() => {
         // log();
-        logger.loginfo("Failed to shutdown naturally. Exiting.");
+        Server.loginfo("Failed to shutdown naturally. Exiting.");
         process.exit(0);
     });
 }
 
-Server._graceful = shutdown => {
+Server._graceful = async (shutdown) => {
     if (!Server.cluster && shutdown) {
-        ['outbound', 'cfreader', 'plugins'].forEach(module => {
-            process.emit('message', {event: `${module  }.shutdown`});
-        });
+        for (const module of ['outbound', 'cfreader', 'plugins']) {
+            process.emit('message', {event: `${module}.shutdown`});
+        }
         const t = setTimeout(shutdown, Server.cfg.main.force_shutdown_timeout * 1000);
         return t.unref();
     }
 
-    if (gracefull_in_progress) {
-        logger.lognotice("Restart currently in progress - ignoring request");
+    if (graceful_in_progress) {
+        Server.lognotice("Restart currently in progress - ignoring request");
         return;
     }
 
-    gracefull_in_progress = true;
+    graceful_in_progress = true;
     // TODO: Make these configurable
     const disconnect_timeout = 30;
     const exit_timeout = 30;
     cluster.removeAllListeners('exit');
+
     // we reload using eachLimit where limit = num_workers - 1
     // this kills all-but-one workers in parallel, leaving one running
     // for new connections, and then restarts that one last worker.
+
     const worker_ids = Object.keys(cluster.workers);
     let limit = worker_ids.length - 1;
     if (limit < 2) limit = 1;
-    async.eachLimit(worker_ids, limit, (id, cb) => {
-        logger.lognotice(`Killing node: ${id}`);
-        const worker = cluster.workers[id];
-        ['outbound', 'cfreader', 'plugins'].forEach(module => {
-            worker.send({event: `${module  }.shutdown`});
-        })
-        worker.disconnect();
-        let disconnect_received = false;
-        const disconnect_timer = setTimeout(() => {
-            if (!disconnect_received) {
-                logger.logcrit("Disconnect never received by worker. Killing.");
-                worker.kill();
-            }
-        }, disconnect_timeout * 1000);
-        worker.once("disconnect", () => {
-            clearTimeout(disconnect_timer);
-            disconnect_received = true;
-            logger.lognotice("Disconnect complete");
-            let dead = false;
-            const timer = setTimeout(() => {
-                if (!dead) {
-                    logger.logcrit(`Worker ${id} failed to shutdown. Killing.`);
-                    worker.kill();
+
+    const todo = []
+
+    for (const id of Object.keys(cluster.workers)) {
+        todo.push((id) => {
+            return new Promise((resolve) => {
+                Server.lognotice(`Killing worker: ${id}`);
+                const worker = cluster.workers[id];
+                for (const module of ['outbound', 'cfreader', 'plugins']) {
+                    worker.send({event: `${module  }.shutdown`});
                 }
-            }, exit_timeout * 1000);
-            worker.once("exit", () => {
-                dead = true;
-                clearTimeout(timer);
-                if (shutdown) cb();
-            });
-        });
-        if (shutdown) return;
-        const newWorker = cluster.fork();
-        newWorker.once("listening", () => {
-            logger.lognotice("Replacement worker online.");
-            newWorker.on('exit', (code, signal) => {
-                cluster_exit_listener(newWorker, code, signal);
-            });
-            cb();
-        });
-    }, err => {
-        // err can basically never happen, but fuckit...
-        if (err) logger.logerror(err);
-        if (shutdown) {
-            logger.loginfo("Workers closed. Shutting down master process subsystems");
-            ['outbound', 'cfreader', 'plugins'].forEach(module => {
-                process.emit('message', {event: `${module  }.shutdown`});
+                worker.disconnect();
+                let disconnect_received = false;
+                const disconnect_timer = setTimeout(() => {
+                    if (!disconnect_received) {
+                        Server.logcrit("Disconnect never received by worker. Killing.");
+                        worker.kill();
+                    }
+                }, disconnect_timeout * 1000);
+
+                worker.once('disconnect', () => {
+                    clearTimeout(disconnect_timer);
+                    disconnect_received = true;
+                    Server.lognotice('Disconnect complete');
+                    let dead = false;
+                    const timer = setTimeout(() => {
+                        if (!dead) {
+                            Server.logcrit(`Worker ${id} failed to shutdown. Killing.`);
+                            worker.kill();
+                        }
+                    }, exit_timeout * 1000);
+                    worker.once('exit', () => {
+                        dead = true;
+                        clearTimeout(timer);
+                        if (shutdown) resolve()
+                    })
+                })
+                if (!shutdown) {
+                    const newWorker = cluster.fork();
+                    newWorker.once('listening', () => {
+                        Server.lognotice('Replacement worker online.');
+                        newWorker.on('exit', (code, signal) => {
+                            cluster_exit_listener(newWorker, code, signal);
+                        });
+                        resolve()
+                    })
+                }
             })
-            const t2 = setTimeout(shutdown, Server.cfg.main.force_shutdown_timeout * 1000);
-            return t2.unref();
+        })
+    }
+
+    while (todo.length) {
+        // process batches of workers
+        await Promise.all(todo.splice(0, limit))
+    }
+
+    if (shutdown) {
+        Server.loginfo("Workers closed. Shutting down master process subsystems");
+        for (const module of ['outbound', 'cfreader', 'plugins']) {
+            process.emit('message', {event: `${module}.shutdown`});
         }
-        gracefull_in_progress = false;
-        logger.lognotice(`Reload complete, workers: ${JSON.stringify(Object.keys(cluster.workers))}`);
-    });
+        const t2 = setTimeout(shutdown, Server.cfg.main.force_shutdown_timeout * 1000);
+        return t2.unref();
+    }
+    graceful_in_progress = false;
+    Server.lognotice(`Reload complete, workers: ${JSON.stringify(Object.keys(cluster.workers))}`);
 }
 
 Server.sendToMaster = (command, params) => {
@@ -250,7 +260,7 @@ Server.sendToMaster = (command, params) => {
 
 Server.receiveAsMaster = (command, params) => {
     if (!Server[command]) {
-        logger.logerror(`Invalid command: ${command}`);
+        Server.logerror(`Invalid command: ${command}`);
         return;
     }
     Server[command].apply(Server, params);
@@ -338,15 +348,15 @@ Server.createServer = params => {
 Server.load_default_tls_config = done => {
     // this fn exists solely for testing
     if (Server.config.root_path != tls_socket.config.root_path) {
-        logger.loginfo(`resetting tls_config.config path to ${Server.config.root_path}`);
+        Server.loginfo(`resetting tls_config.config path to ${Server.config.root_path}`);
         tls_socket.config = tls_socket.config.module_config(path.dirname(Server.config.root_path));
     }
-    tls_socket.getSocketOpts('*', (opts) => {
+    tls_socket.getSocketOpts('*').then(opts => {
         done(opts);
-    });
+    })
 }
 
-Server.get_smtp_server = (ep, inactivity_timeout, done) => {
+Server.get_smtp_server = async (ep, inactivity_timeout) => {
     let server;
 
     function onConnect (client) {
@@ -367,116 +377,118 @@ Server.get_smtp_server = (ep, inactivity_timeout, done) => {
     }
 
     if (ep.port === parseInt(Server.cfg.main.smtps_port, 10)) {
-        logger.loginfo('getting SocketOpts for SMTPS server');
-        tls_socket.getSocketOpts('*', opts => {
-            logger.loginfo(`Creating TLS server on ${ep}`);
+        Server.loginfo('getting SocketOpts for SMTPS server');
+        const opts = await tls_socket.getSocketOpts('*')
+        Server.loginfo(`Creating TLS server on ${ep}`);
 
-            opts.rejectUnauthorized = tls_socket.get_rejectUnauthorized(opts.rejectUnauthorized, ep.port, tls_socket.cfg.main.requireAuthorized)
+        opts.rejectUnauthorized = tls_socket.get_rejectUnauthorized(opts.rejectUnauthorized, ep.port, tls_socket.cfg.main.requireAuthorized)
 
-            server = tls.createServer(opts, onConnect);
-            tls_socket.addOCSP(server);
-            server.has_tls=true;
-            server.on('resumeSession', (id, rsDone) => {
-                logger.loginfo('client requested TLS resumeSession');
-                rsDone(null, null);
-            })
-            Server.listeners.push(server);
-            done(server);
+        server = tls.createServer(opts, onConnect);
+        tls_socket.addOCSP(server);
+        server.has_tls=true;
+        server.on('resumeSession', (id, rsDone) => {
+            Server.loginfo('client requested TLS resumeSession');
+            rsDone(null, null);
         })
+        Server.listeners.push(server);
+        return server
     }
     else {
         server = tls_socket.createServer(onConnect);
         server.has_tls = false;
-        tls_socket.getSocketOpts('*', opts => {
-            Server.listeners.push(server);
-            done(server);
-        })
+        const opts = await tls_socket.getSocketOpts('*')
+        Server.listeners.push(server);
+        return server
     }
 }
 
-Server.setup_smtp_listeners = (plugins2, type, inactivity_timeout) => {
+Server.setup_smtp_listeners = async (plugins2, type, inactivity_timeout) => {
 
-    async.each(
-        Server.get_listen_addrs(Server.cfg.main),  // array of listeners
+    const errors = []
 
-        function setupListener (listen_address, listenerDone) {
+    for (const listen_address of Server.get_listen_addrs(Server.cfg.main)) {
 
-            const ep = endpoint(listen_address, 25);
-            if (ep instanceof Error) return listenerDone(
-                new Error(`Invalid "listen" format in smtp.ini: ${listen_address}`));
+        const ep = endpoint(listen_address, 25);
 
-            Server.get_smtp_server(ep, inactivity_timeout, (server) => {
-                if (!server) return listenerDone();
-
-                server.notes = Server.notes;
-                if (Server.cluster) server.cluster = Server.cluster;
-
-                server
-                    .on('listening', function () {
-                        const addr = this.address();
-                        logger.lognotice(`Listening on ${endpoint(addr)}`);
-                        listenerDone();
-                    })
-                    .on('close', () => {
-                        logger.loginfo(`Listener ${ep} stopped`);
-                    })
-                    .on('error', e => {
-                        if (e.code !== 'EAFNOSUPPORT') return listenerDone(e);
-                        // Fallback from IPv6 to IPv4 if not supported
-                        // But only if we supplied the default of [::0]:25
-                        if (/^::0/.test(ep.host) && Server.default_host) {
-                            server.listen(ep.port, '0.0.0.0', 0);
-                            return;
-                        }
-                        // Pass error to callback
-                        listenerDone(e);
-                    });
-                ep.bind(server, {backlog: 0});
-            });
-        },
-        function runInitHooks (err) {
-            if (err) {
-                logger.logerror(`Failed to setup listeners: ${err.message}`);
-                return logger.dump_and_exit(-1);
-            }
-            Server.listening();
-            plugins2.run_hooks(`init_${type}`, Server);
+        if (ep instanceof Error) {
+            Server.logerror(`Invalid "listen" format in smtp.ini: ${listen_address}`)
+            continue
         }
-    );
+
+        const server = await Server.get_smtp_server(ep, inactivity_timeout)
+        if (!server) continue;
+
+        server.notes = Server.notes;
+        if (Server.cluster) server.cluster = Server.cluster;
+
+        server
+            .on('listening', function () {
+                const addr = this.address();
+                Server.lognotice(`Listening on ${endpoint(addr)}`);
+            })
+            .on('close', () => {
+                Server.loginfo(`Listener ${ep} stopped`);
+            })
+            .on('error', e => {
+                errors.push(e)
+                Server.logerror(`Failed to setup listeners: ${e.message}`);
+                if (e.code !== 'EAFNOSUPPORT') {
+                    Server.logerror(e)
+                    return
+                }
+                // Fallback from IPv6 to IPv4 if not supported
+                // But only if we supplied the default of [::0]:25
+                if (/^::0/.test(ep.host) && Server.default_host) {
+                    server.listen(ep.port, '0.0.0.0', 0);
+                    return;
+                }
+                // Pass error to callback
+                Server.logerror(e)
+            })
+
+        await ep.bind(server, {backlog: 0});
+    }
+
+    if (errors.length) {
+        for (const e of errors) {
+            Server.logerror(`Failed to setup listeners: ${e.message}`);
+        }
+        return logger.dump_and_exit(-1);
+    }
+    Server.listening();
+    plugins2.run_hooks(`init_${type}`, Server);
 }
 
-Server.setup_http_listeners = () => {
-    if (!Server.http.cfg) return;
-    if (!Server.http.cfg.listen) return;
+Server.setup_http_listeners = async () => {
+    if (!Server.http?.cfg?.listen) return;
 
     const listeners = Server.get_listen_addrs(Server.http.cfg, 80);
     if (!listeners.length) return;
 
     try {
         Server.http.express = require('express');
-        logger.loginfo('express loaded at Server.http.express');
+        Server.loginfo('express loaded at Server.http.express');
     }
     catch (err) {
-        logger.logerror('express failed to load. No http server. ' +
-                ' Try installing express with: npm install -g express');
+        Server.logerror('express failed to load. No http server. Install express with: npm install -g express');
         return;
     }
 
     const app = Server.http.express();
     Server.http.app = app;
-    logger.loginfo('express app is at Server.http.app');
+    Server.loginfo('express app is at Server.http.app');
 
-    function setupListener (listen_address, cb) {
+    for (const listen_address of listeners) {
+
         const ep = endpoint(listen_address, 80);
         if (ep instanceof Error) {
-            return cb(new Error(`Invalid format for listen in http.ini: ${listen_address}`));
+            Server.logerror(`Invalid format for listen in http.ini: ${listen_address}`)
+            continue
         }
 
         if (443 == ep.port) {
-            // clone the default TLS opts
-            const tlsOpts = Object.assign({}, tls_socket.certsByHost['*']);
+            const tlsOpts = { ...tls_socket.certsByHost['*'] }
             tlsOpts.requestCert = false; // not appropriate for HTTPS
-            // console.log(tlsOpts);
             Server.http.server = require('https').createServer(tlsOpts, app);
         }
         else {
@@ -486,30 +498,19 @@ Server.setup_http_listeners = () => {
         Server.listeners.push(Server.http.server);
 
         Server.http.server.on('listening', function () {
-            const addr = this.address();
-            logger.lognotice(`Listening on ${endpoint(addr)}`);
-            cb();
-        });
+            Server.lognotice(`Listening on ${endpoint(this.address())}`);
+        })
 
         Server.http.server.on('error', e => {
-            logger.logerror(e);
-            cb(e);
-        });
+            Server.logerror(e);
+        })
 
-        ep.bind(Server.http.server, {backlog: 0});
+        await ep.bind(Server.http.server, {backlog: 0});
     }
 
-    function registerRoutes (err) {
-        if (err) {
-            logger.logerror(`Failed to setup http routes: ${err.message}`);
-        }
-
-        Server.plugins.run_hooks('init_http', Server);
-        app.use(Server.http.express.static(Server.get_http_docroot()));
-        app.use(Server.handle404);
-    }
-
-    async.each(listeners, setupListener, registerRoutes);
+    Server.plugins.run_hooks('init_http', Server);
+    app.use(Server.http.express.static(Server.get_http_docroot()));
+    app.use(Server.handle404);
 }
 
 Server.init_master_respond = (retval, msg) => {
@@ -547,13 +548,13 @@ Server.init_master_respond = (retval, msg) => {
                 .send({event: 'outbound.load_pid_queue', data: pids[j]});
         }
         cluster.on('online', worker => {
-            logger.lognotice(
+            Server.lognotice(
                 'worker started',
                 { worker: worker.id, pid: worker.process.pid }
             );
         });
         cluster.on('listening', (worker, address) => {
-            logger.lognotice(`worker ${worker.id} listening on ${endpoint(address)}`);
+            Server.lognotice(`worker ${worker.id} listening on ${endpoint(address)}`);
         });
         cluster.on('exit', cluster_exit_listener);
     });
@@ -561,10 +562,10 @@ Server.init_master_respond = (retval, msg) => {
 
 function cluster_exit_listener (worker, code, signal) {
     if (signal) {
-        logger.lognotice(`worker ${worker.id} killed by signal ${signal}`);
+        Server.lognotice(`worker ${worker.id} killed by signal ${signal}`);
     }
     else if (code !== 0) {
-        logger.lognotice(`worker ${worker.id} exited with error code: ${code}`);
+        Server.lognotice(`worker ${worker.id} exited with error code: ${code}`);
     }
     if (signal || code !== 0) {
         // Restart worker
@@ -618,36 +619,35 @@ Server.listening = () => {
 }
 
 Server.init_http_respond = () => {
-    logger.loginfo('init_http_respond');
+    Server.loginfo('init_http_respond');
 
     let WebSocketServer;
     try { WebSocketServer = require('ws').Server; }
     catch (e) {
-        logger.logerror(`unable to load ws.\n  did you: npm install -g ws?`);
+        Server.logerror(`unable to load ws.\n  did you: npm install -g ws?`);
         return;
     }
 
     if (!WebSocketServer) {
-        logger.logerror('ws failed to load');
+        Server.logerror('ws failed to load');
         return;
     }
 
     Server.http.wss = new WebSocketServer({ server: Server.http.server });
-    logger.loginfo('Server.http.wss loaded');
+    Server.loginfo('Server.http.wss loaded');
 
     Server.plugins.run_hooks('init_wss', Server);
 }
 
 Server.init_wss_respond = () => {
-    logger.loginfo('init_wss_respond');
-    // logger.logdebug(arguments);
+    Server.loginfo('init_wss_respond');
 }
 
 Server.get_http_docroot = () => {
     if (Server.http.cfg.docroot) return Server.http.cfg.docroot;
 
-    Server.http.cfg.docroot = path.join( (process.env.HARAKA || __dirname), '/html');
-    logger.loginfo(`using html docroot: ${Server.http.cfg.docroot}`);
+    Server.http.cfg.docroot = path.join( (process.env.HARAKA || __dirname), 'http', 'html');
+    Server.loginfo(`using html docroot: ${Server.http.cfg.docroot}`);
     return Server.http.cfg.docroot;
 }
 

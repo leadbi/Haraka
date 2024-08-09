@@ -4,7 +4,7 @@
 
 // Note: You can disable setting `connection.notes.auth_passwd` by `plugin.blankout_password = true`
 
-const crypto = require('crypto');
+const crypto = require('node:crypto');
 
 const tlds   = require('haraka-tld')
 const utils  = require('haraka-utils');
@@ -241,10 +241,12 @@ exports.auth_cram_md5 = function (next, connection, params) {
 exports.hexi = number => String(Math.abs(parseInt(number)).toString(16))
 
 exports.constrain_sender = function (next, connection, params) {
+    if (this?.cfg?.main?.constrain_sender === false) return next()
+
     const au = connection.results.get('auth')?.user
     if (!au) return next()
 
-    const ad = /@/.test(au) ? au.split('@').pop() : au
+    const ad = /@/.test(au) ? au.split('@').pop() : null
     const ed = params[0].host
 
     if (!ad || !ed) return next()
