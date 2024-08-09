@@ -1,48 +1,52 @@
 'use strict';
 
-const utils        = require('haraka-utils');
+const utils = require('haraka-utils');
+const net_utils = require('haraka-net-utils')
 
-const sock         = require('../line_socket');
-const logger       = require('../logger');
+const tls_socket = require('../tls_socket');
+const logger = require('../logger');
+const obc  = require('./config');
 
-const obc          = require('./config');
+exports.name = 'outbound'
 
-function _create_socket (name, port, host, local_addr, is_unix_socket, callback) {
+// Get a socket for the given attributes.
+exports.get_client = function (mx, callback) {
+    const socketArgs = mx.path ? { path: mx.path } : { port: mx.port, host: mx.exchange, localAddress: mx.bind };
 
-    const socket = is_unix_socket ? sock.connect({path: host}) : sock.connect({port, host, localAddress: local_addr});
-    socket.name = name;
+    const socket = tls_socket.connect(socketArgs);
+    net_utils.add_line_processor(socket);
+
+    socket.name = `outbound::${JSON.stringify(socketArgs)}`;
     socket.__uuid = utils.uuid();
     socket.setTimeout(obc.cfg.connect_timeout * 1000);
-    logger.logdebug(`[outbound] created. host: ${host} port: ${port}`, { uuid: socket.__uuid });
+
+    logger.debug(exports, `created ${socket.name}`, { uuid: socket.__uuid });
+
     socket.once('connect', () => {
         socket.removeAllListeners('error'); // these get added after callback
         socket.removeAllListeners('timeout');
         callback(null, socket);
-    });
+    })
+
     socket.once('error', err => {
         socket.end();
         socket.removeAllListeners();
         socket.destroy();
-        callback(`Outbound connection error: ${err}`, null);
-    });
+        callback(err.message, null);
+    })
+
     socket.once('timeout', () => {
         socket.end();
         socket.removeAllListeners();
         socket.destroy();
-        callback(`Outbound connection timed out to ${host}:${port}`, null);
-    });
+        callback(`connection timed out to ${socket.name}`, null);
+    })
 }
 
-
-// Get a socket for the given attributes.
-exports.get_client = (port = 25, host = 'localhost', local_addr, is_unix_socket, callback) => {
-    const name = `outbound::${port}:${host}:${local_addr}`;
-
-    _create_socket(name, port, host, local_addr, is_unix_socket, callback)
-}
-
-exports.release_client = (socket, port, host, local_addr, error) => {
-    logger.logdebug(`[outbound] release_client: ${socket.__uuid} ${host}:${port} to ${local_addr}`);
+exports.release_client = (socket, mx) => {
+    let logMsg = `release_client: ${socket.name}`
+    if (mx.bind) logMsg += ` from ${mx.bind}`
+    logger.debug(exports, logMsg);
     socket.removeAllListeners();
     socket.destroy();
 }

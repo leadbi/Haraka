@@ -1,12 +1,9 @@
 'use strict';
 // a single connection
 
-// node.js built-in libs
-const dns         = require('dns');
-const fs          = require('fs');
-const net         = require('net');
-const os          = require('os');
-const path        = require('path');
+const dns         = require('node:dns');
+const net         = require('node:net');
+const os          = require('node:os');
 
 // npm libs
 const ipaddr      = require('ipaddr.js');
@@ -55,36 +52,36 @@ class Connection {
         this.server = server;
         this.cfg = cfg;
 
-        this.local = {           // legacy property locations
-            ip: null,            // c.local_ip
-            port: null,          // c.local_port
+        this.local = {
+            ip: null,
+            port: null,
             host: net_utils.get_primary_host_name(),
             info: 'Haraka',
         };
         this.remote = {
-            ip:   null,          // c.remote_ip
-            port: null,          // c.remote_port
-            host: null,          // c.remote_host
-            info: null,          // c.remote_info
-            closed: false,       // c.remote_closed
+            ip:   null,
+            port: null,
+            host: null,
+            info: null,
+            closed: false,
             is_private: false,
             is_local: false,
         };
         this.hello = {
-            host: null,          // c.hello_host
-            verb: null,          // c.greeting
+            host: null,
+            verb: null,
         };
         this.tls = {
-            enabled: false,      // c.using_tls
-            advertised: false,   // c.notes.tls_enabled
+            enabled: false,
+            advertised: false,
             verified: false,
             cipher: {},
         };
         this.proxy = {
-            allowed: false,      // c.proxy
-            ip: null,            // c.haproxy_ip
+            allowed: false,
+            ip: null,
             type: null,
-            timer: null,         // c.proxy_timer
+            timer: null,
         };
         this.set('tls', 'enabled', (!!server.has_tls));
 
@@ -132,8 +129,7 @@ class Connection {
         this.last_rcpt_msg = null;
         this.hook = null;
         if (this.cfg.headers.show_version) {
-            const hpj = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json')));
-            this.local.info += `/${hpj.version}`;
+            this.local.info += `/${utils.getVersion(__dirname)}`;
         }
         Connection.setupClient(this);
     }
@@ -223,11 +219,10 @@ class Connection {
     setTLS (obj) {
         this.set('hello', 'host', undefined);
         this.set('tls',   'enabled', true);
-        const options = ['cipher','verified','verifyError','peerCertificate'];
-        options.forEach(t => {
+        for (const t of ['cipher','verified','verifyError','peerCertificate']) {
             if (obj[t] === undefined) return;
             this.set('tls', t, obj[t]);
-        })
+        }
         // prior to 2017-07, authorized and verified were both used. Verified
         // seems to be the more common and has the property updated in the
         // tls object. However, authorized has been up-to-date in the notes. Store
@@ -269,25 +264,9 @@ class Connection {
                 this.set('remote.is_private', true);
             }
             else {
-                this.set('remote.is_private', net_utils.is_private_ipv4(this.remote.ip));
+                this.set('remote.is_private', net_utils.is_private_ip(this.remote.ip));
             }
         }
-
-        // sunset 3.0.0
-        if (prop_str === 'hello.verb') {
-            this.greeting = val;
-        }
-        else if (prop_str === 'tls.enabled') {
-            this.using_tls = val;
-        }
-        else if (prop_str === 'proxy.ip') {
-            this.haproxy_ip = val;
-        }
-        else {
-            const legacy_name = prop_str.split('.').join('_');
-            this[legacy_name] = val;
-        }
-        // /sunset
     }
     get (prop_str) {
         return prop_str.split('.').reduce((prev, curr) => {
@@ -395,7 +374,7 @@ class Connection {
     }
     process_data (data) {
         if (this.state >= states.DISCONNECTING) {
-            this.logwarn(`data after disconnect from ${this.remote.ip}`);
+            this.loginfo(`data after disconnect from ${this.remote.ip}`);
             return;
         }
 
@@ -538,6 +517,7 @@ class Connection {
             code = msg.code;
             msg = msg.reply;
         }
+
         if (!Array.isArray(msg)) {
             messages = msg.toString().split(/\n/);
         }
@@ -573,6 +553,8 @@ class Connection {
             this.logprotocol(`S: ${line}`);
             buf = `${buf}${line}\r\n`;
         }
+
+        if (this.client.write === undefined) return buf;  // testing
 
         try {
             this.client.write(buf);
@@ -635,7 +617,6 @@ class Connection {
         this.client.end();
     }
     get_capabilities () {
-
         return [];
     }
     tran_uuid () {
@@ -869,7 +850,7 @@ class Connection {
             default:
                 // RFC5321 section 4.1.1.1
                 // Hostname/domain should appear after 250
-                this.respond(250, `${this.local.host} Hello ${this.get_remote('host')}${this.ehlo_hello_message}`);
+                this.respond(250, `${this.local.host} Hello ${this.get_remote('host')}, ${this.ehlo_hello_message}`);
         }
     }
     ehlo_respond (retval, msg) {
@@ -902,7 +883,7 @@ class Connection {
                 // Hostname/domain should appear after 250
 
                 const response = [
-                    `${this.local.host} Hello ${this.get_remote('host')}${this.ehlo_hello_message}`,
+                    `${this.local.host} Hello ${this.get_remote('host')}, ${this.ehlo_hello_message}`,
                     "PIPELINING",
                     "8BITMIME",
                 ];
@@ -977,7 +958,6 @@ class Connection {
         })
     }
     mail_respond (retval, msg) {
-        const self = this;
         if (!this.transaction) {
             this.logerror("mail_respond found no transaction!");
             return;
@@ -992,12 +972,12 @@ class Connection {
             }
         );
 
-        function store_results (action) {
+        const store_results = (action) => {
             let addr = sender.format();
             if (addr.length > 2) {  // all but null sender
                 addr = addr.substr(1, addr.length -2); // trim off < >
             }
-            self.transaction.results.add({name: 'mail_from'}, {
+            this.transaction.results.add({name: 'mail_from'}, {
                 action,
                 code: constants.translate(retval),
                 address: addr,
@@ -1008,25 +988,25 @@ class Connection {
             case constants.deny:
                 this.respond(550, msg || `${dmsg} denied`, () => {
                     store_results('reject');
-                    self.reset_transaction();
+                    this.reset_transaction();
                 });
                 break;
             case constants.denydisconnect:
                 this.respond(550, msg ||  `${dmsg} denied`, () => {
                     store_results('reject');
-                    self.disconnect();
+                    this.disconnect();
                 });
                 break;
             case constants.denysoft:
                 this.respond(450, msg || `${dmsg} denied`, () => {
                     store_results('tempfail');
-                    self.reset_transaction();
+                    this.reset_transaction();
                 });
                 break;
             case constants.denysoftdisconnect:
                 this.respond(450, msg || `${dmsg} denied`, () => {
                     store_results('tempfail');
-                    self.disconnect();
+                    this.disconnect();
                 });
                 break;
             default:
@@ -1469,7 +1449,7 @@ class Connection {
         return received_header;
     }
     auth_results (message) {
-        // http://tools.ietf.org/search/rfc7001
+        // https://datatracker.ietf.org/doc/rfc7001/
         const has_tran = !!((this.transaction?.notes));
 
         // initialize connection note
@@ -1719,7 +1699,12 @@ class Connection {
         });
     }
     queue_msg (retval, msg) {
-        if (msg) return msg;
+        if (msg) {
+            if (typeof msg === 'object' && msg.constructor.name === 'DSN') {
+                return msg.reply
+            }
+            return msg;
+        }
 
         switch (retval) {
             case constants.ok:
@@ -1754,7 +1739,8 @@ class Connection {
         }
     }
     queue_outbound_respond (retval, msg) {
-        if (!msg) msg = this.queue_msg(retval, msg) || 'Message Queued';
+        if (this.remote.closed) return;
+        msg = this.queue_msg(retval, msg) || 'Message Queued';
         this.store_queue_result(retval, msg);
         msg = `${msg} (${this.transaction.uuid})`;
         if (retval !== constants.ok) {
@@ -1799,7 +1785,7 @@ class Connection {
                 });
                 break;
             default:
-                outbound.send_email(this.transaction, (retval2, msg2) => {
+                outbound.send_trans_email(this.transaction, (retval2, msg2) => {
                     if (!msg2) msg2 = this.queue_msg(retval2, msg);
                     switch (retval2) {
                         case constants.ok:
@@ -1830,7 +1816,7 @@ class Connection {
         }
     }
     queue_respond (retval, msg) {
-        if (!msg) msg = this.queue_msg(retval, msg);
+        msg = this.queue_msg(retval, msg);
         this.store_queue_result(retval, msg);
         msg = `${msg} (${this.transaction.uuid})`;
 
@@ -1910,17 +1896,4 @@ exports.createConnection = (client, server, cfg) => {
     return new Connection(client, server, cfg);
 }
 
-// add logger methods to Connection:
-for (const key in logger) {
-    if (!/^log\w/.test(key)) continue;
-    Connection.prototype[key] = (function (level) {
-        return function () {
-            // pass the connection instance to logger
-            const args = [ this ];
-            for (let i=0, l=arguments.length; i<l; i++) {
-                args.push(arguments[i]);
-            }
-            logger[level].apply(logger, args);
-        };
-    })(key);
-}
+logger.add_log_methods(Connection)

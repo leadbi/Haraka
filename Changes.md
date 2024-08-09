@@ -1,12 +1,109 @@
 
 ### Unreleased
 
+#### Added
+
+- doc: add CONTRIBUTORS #3312
+- tls_socket: `config/tls` dir loading is now recursive
+
+#### Changed
+
+- prefix node libs with 'node:' #3359
+- .gitignore: add config/me and config/*.pem
+- auth_base: enable disabling constrain_sender at runtime #3298
+- auth_base: skip constrain_sender when auth user has no domain #3319
+- avg: repackaged as NPM module #3347
+- bounce: repackaged plugin as NPM module #3341
+- clamd: repackaged plugin as NPM module
+- config/plugins: consistent formatting #3359
+- connection: check remote is connected before queue #3338
+  - improve log message for queue* hooks, fixes #2998
+  - support IPv6 when setting remote.is_private #3295
+  - in setTLS, replace forEach with for...of
+  - NOTE: remove a handful of 3.0 sunset property names #3315
+- contrib/plugin2npm.sh: fix path to package.json #3359
+- deps: bump all versions to latest #3303, #3344
+- dkim: repackaged as NPM module #3311
+- esets: repackaged as NPM module #3353
+- greylist: repackaged as NPM module
+- helo.checks: require a successful HELO/EHLO #3352
+- new NPM plugin dns-list, repackages dnsbl, dnswl, backscatterer #3313
+- when using message-stream, don't send default options #3290
+- rcpt_to.host_list: add connection ID to log messages #3322
+- line_socket: remove unused callback #3344
+- logger: don't load outbound (race condition). Instead, set name property #3322
+- logger: extend add_log_methods to Classes (connection, plugins, hmail) #3322
+- logger: when logging via `logger` methods, use short names #3322
+- logger: check Object.hasOwn to avoid circular deps
+- mail_from.resolvable: refactored, leaning on improved net_utils #3322
+  - fixes haraka/haraka-net-utils#88
+- messagesniffer: repackaged as NPM module
+- outbound
+  - check for local_mx only when default route is used #3307
+  - client_pool: use tls_socket directly (shed line_socket)
+  - client_pool: sock.name is now JSON of socket args
+  - client_pool.get_client & release_client: arity of 5 -> 2
+  - mx_lookup: make it async/await
+  - mx_lookup: deleted. Logic moved into net_utils #3322
+  - use net_utils.HarkaMx for get_mx parsing #3344
+  - emit log message when ignoring local MX #3285
+  - pass in config when initiating txn #3315
+  - minor es6 updates #3315, #3322
+  - logging improvements #3322
+    - was: [-] [core] [outbound] Failed to get socket: Outbound connection error: Error: connect ECONNREFUSED 172.16.16.14:25
+    - now: [A63B62DF-F3B8-4096-8996-8CE83494A188.1.1] [outbound] Failed to get socket: connect ECONNREFUSED 172.16.16.14:25
+  - shorter logger syntax: logger.loginfo -> logger.info
+  - remove log prefixes of `[outbound] `, no longer needed
+  - delete try_deliver_host. Use net_utils to resolve MX hosts to IPs #3322
+  - remove config setting ipv6_enabled #3322
+  - remove undocumented use of send_email with arity of 2. #3322
+  - encapsulate force_tls logic into get_force_tls #3322
+  - es6(async/promise): pre_send_trans_email_respond, process_delivery
+- queue/lmtp: refactored for DRY and improved readability #3322
+- smtp_client: pass connect_timeout, maybe fixes #3281
+- spamassassin: repackaged as NPM module #3348
+- style(es6): more for...of loops
+- deps: moved attachment, spf, & dkim into optional deps
+- doc(Plugins.md): update registry
+- doc(Outbound.md): improve GHFM formatting
+- remove last vestiges of header_hide_version (long ago renamed)
+- server.js: use the local logger methods
+  - es6(async): _graceful, get_smtp_server, setup_smtp_listeners
+  - replace async.eachLimit with Promise.all batches
+- status: replace async.map with Promise.allSettled
+- get Haraka version from utils.getVersion (which includes git id if running from repo)
+- tls_socket: remove secureConnection. Fixes #2743
+  - getSocketOpts is now async
+  - parse_x509 is now async
+  - shed dependency on caolin/async & openssl-wrapper
+  - get_certs_dir is now async
+    - completely refactored.
+- transaction: init with conn.init_transaction, always pass in cfg #3315
+- test: add a connection.response test case with DSN #3305
+- test: convert test runner to mocha
+- test: rename tests -> test (where test runner expect) #3340
+
+#### Fixed
+
+- fix(logger): refactor add_log_methods, don't set extra `loglog*` names
+- doc(connection): update rfc7001 URL
+- fix(bin/haraka): list NPM installed plugin #3310
+- fix(bin/haraka): get hook list from doc/Plugins #3306
+- fix(outbound): call cb even if no MX is found #3294
+- fix(helo.checks): declare reject.literal_mismatch as boolean #3293
+- fix(outbound): allow LHLO over insecure socket if TLS is forced #3278
+- fix(outbound): include return path param SMTPUTF8 when required #3289
+- fix(outbound): replace empty Message-ID header #3288
+- fix(outbound): don't send SNI servername when connecting to an IP
+- fix(outbound): chown queue dir after creation #3291
+- fix(server): async endpoint.bind() and await in server.js #3366
+- fix(outbound): get_mx DNS error handling #3376
+
 ### [3.0.3] - 2024-02-07
 
 #### Added
 
 - feat(auth_vpopmaild): when outbound, assure the envelope domain matches AUTH domain #3265
-- docs(outbound): remove example setting outbound_ip #3253
 - doc(Plugins.md): add pi-queue-kafka #3247
 - feat(rabbitmq_amqplib): configurable optional queue arguments #3239
 - feat(clamd): add x-haraka-virus header #3207

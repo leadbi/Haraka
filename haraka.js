@@ -20,20 +20,18 @@ catch (e) {
     require('module')._initPaths(); // Horrible hack
 }
 
-const fs = require('fs');
+const utils = require('haraka-utils');
 const logger = require('./logger');
 const server = require('./server');
 
-exports.version = JSON.parse(
-    fs.readFileSync(path.join(__dirname, './package.json'), 'utf8')
-).version;
+exports.version = utils.getVersion(__dirname)
 
 process.on('uncaughtException', err => {
     if (err.stack) {
-        err.stack.split("\n").forEach(line => logger.logcrit(line));
+        err.stack.split("\n").forEach(line => logger.crit(line));
     }
     else {
-        logger.logcrit(`Caught exception: ${JSON.stringify(err)}`);
+        logger.crit(`Caught exception: ${JSON.stringify(err)}`);
     }
     logger.dump_and_exit(1);
 });
@@ -41,18 +39,16 @@ process.on('uncaughtException', err => {
 let shutting_down = false;
 const signals = ['SIGINT'];
 
-if (process.pid === 1) {
-    signals.push('SIGTERM')
-}
+if (process.pid === 1) signals.push('SIGTERM')
 
-signals.forEach((sig) => {
+for (const sig of signals) {
     process.on(sig, () => {
         if (shutting_down) return process.exit(1);
         shutting_down = true;
         const [, filename] = process.argv;
         process.title = path.basename(filename, '.js');
 
-        logger.lognotice(`${sig} received`);
+        logger.notice(`${sig} received`);
         logger.dump_and_exit(() => {
             if (server.cluster?.isMaster) {
                 server.performShutdown();
@@ -62,10 +58,10 @@ signals.forEach((sig) => {
             }
         });
     });
-});
+}
 
 process.on('SIGHUP', () => {
-    logger.lognotice('Flushing the temp fail queue');
+    logger.notice('Flushing the temp fail queue');
     server.flushQueue();
 });
 
@@ -74,7 +70,7 @@ process.on('exit', code => {
     const [, filename] = process.argv;
     process.title = path.basename(filename, '.js');
 
-    logger.lognotice('Shutting down');
+    logger.notice('Shutting down');
     logger.dump_logs();
 });
 
